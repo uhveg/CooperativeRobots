@@ -80,7 +80,6 @@ class CoppeliaYoubot:
         S = np.diag(Sdiag)
         A = np.vstack(( E2, Youbot.jacobnn(*np.hstack((self.x, self.theta)))))
         C = np.vstack(( np.eye(8), -np.eye(8) ))
-        # p = -5*(np.array([[0.1,0.1,0.1,0.1,2,2,0.1,0.1]]).T)*np.array([[0,0,0,0,-0.4 - q[4,0],1.1 - q[5,0],0.8708 - q[6,0],0]]).T
         p = np.diag(self.KGains) @ (q - self.desQ)
         
         b = np.vstack(( phi_C[2], UL + Up + phi_Aux, self.KphiE*phi_E ))

@@ -2,42 +2,24 @@ from numpy import pi, sin, cos
 import numpy as np
 from robotics import sgnbi, linear
 
-MAX_SIMULATION_TIME = 50
+MAX_SIMULATION_TIME = 30
 
 def desPosition(t:float) -> np.ndarray:
-    t /= 40
-    P0 = np.array([3, 0])
-    P1 = np.array([0, -3])
-    P2 = np.array([0, 3])
-    P3 = np.array([-3, 0])
-    if t > 1:
-        return np.vstack(( P3[:, np.newaxis], 0.5 ))
-    line = (1 - t)**3 * P0 + 3 * (1 - t)**2 * t * P1 + 3 * (1 - t) * t**2 * P2 + t**3 * P3
-    pos = np.vstack(( line[:, np.newaxis], 0.5 ))
-    return pos
+    return np.array([[0,1,0.5]]).T
 
 def desOrientation(t:float) -> np.ndarray:
-    if t > 40:
-        t = 40 - 0.05
-    dx = desPosition(t+0.05) - desPosition(t)
-    dx = dx / np.linalg.norm(dx)
-    dz = np.array([[0,0,1]]).T
-    dy = np.cross(dz.squeeze(), dx.squeeze())[:,np.newaxis]
-    dy = dy / np.linalg.norm(dy)
-    return np.hstack(( dx, dy, dz ))
+    return np.array([[0,1,0]]).T
 
-Q = [[3+0.212,  0.92, 3*pi/4, 0, -0.4, 1.1, 0.8708, -pi/2],
-    [3+0.92,  0.212, -pi/4, 0, -0.4, 1.1, 0.8708, pi/2],
-    [3-0.212, -0.92, -pi/4, 0, -0.4, 1.1, 0.8708, -pi/2],
-    [3-0.92, -0.212, 3*pi/4, 0, -0.4, 1.1, 0.8708, pi/2]]
+Q = [[1,  0, pi/2, 0, 0.3, -1.3, -0.8, 0],
+    [-1,  0, pi/2, 0, 0.3, -1.3, -0.8, 0]]
 
-PARAMETERS = dict(KphiC  = 5.0,
-                  KphiE  = 5.0,
-                  KphiB  = 2.0,
-                  KpB    = 3.0,
-                  kS     = 20.0,
-                  desQ   = np.array([[0,0,0,0,-0.4,1.1,0.8708,0]]).T,
-                  KGains = np.array([0,0,0,0,1,1,1,0]),
-                  base_o = 1.0,
-                  gamma  = 10.0,
-                  AF = linear)
+PARAMETERS = dict(KphiC  = 1.0,
+                  KphiE  = 1.0,
+                  KphiB  = 1.0,
+                  KpB    = 1.0,
+                  kS     = 1.0,                                             # not used
+                  desQ   = np.array([[0,0,0,0,0.3,-1.3,0.8,0]]).T,          # not used
+                  KGains = np.array([0,0,0,0,1,1,1,0]),                     # not used
+                  gamma  = 1.0,                                             # not used
+                  AF = linear,                                              # not used
+                  updKl = False)

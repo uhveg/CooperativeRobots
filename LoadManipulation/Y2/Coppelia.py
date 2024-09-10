@@ -6,7 +6,7 @@ import sys
 time = 0
 
 try:
-    client = RemoteAPIClient(timeout=3)
+    client = RemoteAPIClient(host="localhost", port=23000)
     sim = client.require('sim')
     sim.getObject('/DefaultCamera')
     print("Connected to CoppeliaSim successfully.")
@@ -33,7 +33,7 @@ def startSimulation() -> None:
     sim.startSimulation()
 
 class CoppeliaYoubot:
-    def __init__(self, name:str) -> None:
+    def __init__(self, name:str, parameters) -> None:
         self.id = int(name[-1])
         self.robot = sim.getObject(f"/{name}")
         self.yScript = sim.getScript(sim.scripttype_childscript, self.robot)
@@ -45,17 +45,21 @@ class CoppeliaYoubot:
         self.T = Youbot.fkine(*np.hstack((self.x,self.theta)))
 
         self.KL, self.alphaL, self.deltaL = 3.15, 1.0, 0.1
-        self.KphiC, self.KphiE, self.KphiB = 5.0, 5.0, 5.0
-        self.KpB = 5.0
+        # self.KphiC, self.KphiE, self.KphiB = 5.0, 5.0, 5.0
+        # self.KpB = 5.0
 
-        self.Kznn = znn(3.15, 0.05)
+        step_sz, self.KphiC, self.KphiE, \
+            self.KphiB, self.KpB, self.kS, \
+                self.desQ, self.KGains, \
+                    gamma, AF, self.UPDATE_KL = parameters
+
+        self.Kznn = znn(3.15, step_sz)
 
         n, m, q = 8, 7, 16
         y0 = 0.0*np.ones((m+n+q,1))
         G0 = 0.5*np.ones((m+n+q,m+n+q))
         u0 = 0.0*np.ones((m+n+q,1))
-        self.NN = TVQPEIZNN(y0, G0, u0, (n,m,q), gamma=1.0, tau=0.05)
-        # self.NN = TVQPEIZNN2(y0[:n+q], (n,m,q), gamma=5.0, tau=0.05)
+        self.NN = TVQPEIZNN(y0, G0, u0, (n,m,q), gamma=gamma, tau=step_sz, AF=AF)
     
     def applyFixedControl(self, neighbor:'CoppeliaYoubot', posB_d:np.ndarray, dir_d: np.ndarray) -> tuple[np.ndarray]:
         self.updateValues()
@@ -70,32 +74,20 @@ class CoppeliaYoubot:
         phi_E = 0.5 * S_operator(de).T @ rxE
         phi_C = 0.5 * S_operator(dc).T @ self.getCarRx()
         phi_B = 0.5 * S_operator(dir_d).T @ de
-        phi_BB = (dir_d - de)
         
         sgnID = 1 if self.id == 1 else -1
         l12 = pi - pj
         nl12 = np.linalg.norm(l12)
         
-        if self.id == 1:
-            self.Kznn.updateK((nl12 - 1.5))
-            self.KL = self.Kznn.k
-        else:
-            self.KL = neighbor.KL
+        if self.UPDATE_KL:
+            self.Kznn.updateK((nl12 - 2.0))
+            self.KL = self.Kznn.k if self.id == 1 else neighbor.KL
         
         UL = -self.alphaL*(1 - (1/(self.KL*nl12))*(csch((nl12-self.deltaL)/self.KL)**2))*(l12)
         Up = self.KpB*(posB_d - 0.5*(pi+pj))
-        Uphi = sgnID * self.KphiB*(nl12**2)*(np.array([[-de[1,0]], [de[0,0]]]) * (phi_B[2]))
-
-        dp1 = np.cross(de.squeeze(), np.array([1,0,0]))[:,np.newaxis]
-        dp2 = np.cross(de.squeeze(), np.array([0,1,0]))[:,np.newaxis]
-        dp3 = np.cross(de.squeeze(), np.array([0,0,1]))[:,np.newaxis]
-
-        # JB = np.hstack(( dp1, dp2, dp3))
         JB = S_operator(de)
         phi_Aux = sgnID * self.KphiB * (nl12**2) * JB @ phi_B
-        # print(phi_B)
-        # b = np.vstack(( UL + Up[:2] + Uphi,  Up[2] + phi_B[0], self.KphiE*phi_E))
-        b = np.vstack(( UL + Up + phi_Aux + perturbation(time, self.id), self.KphiE*phi_E))
+        b = np.vstack(( UL + Up + phi_Aux, self.KphiE*phi_E))
 
         J = Youbot.jacob0(*np.hstack((self.x, self.theta)))
         mu = np.linalg.det(J @ J.T)
@@ -104,9 +96,6 @@ class CoppeliaYoubot:
             lb = 0
         else:
             lb = (1-(mu/epsilon)**2)*(lmax**2)
-            # print("bad")
-            # stopSimulation()
-            # exit(-1)
         pJ = J.T @ np.linalg.inv(J @ J.T + (lb**2) * np.eye(6))
         dq = pJ @ b
         dq[2,0] = self.KphiC * phi_C[2,0]
@@ -114,19 +103,14 @@ class CoppeliaYoubot:
         self.setArmVelocity(np.squeeze(dq[3:]))
         self.setOmnidirectionalGlobalSpeed(np.squeeze(dq[:3]))
 
-        
-
         cosim_derxe = (de.T @ rxE).item()
         cosim_dcrxc = (dc.T @ self.getCarRx()).item()
         cosim_ddede = (dir_d.T @ de).item()
-        assert type(cosim_derxe) == float
-        assert type(cosim_dcrxc) == float
-        assert type(cosim_ddede) == float
         return (dq, nl12, de, cosim_ddede, cosim_dcrxc, cosim_derxe)
 
     def applyNeuralControl(self, neighbor:'CoppeliaYoubot', posB_d:np.ndarray, dir_d: np.ndarray) -> tuple[np.ndarray]:
         self.updateValues()
-        self.NN.gamma = 0.5 + 15*time/15
+        # self.NN.gamma = 0.5 + 15*time/15
         q   = np.hstack((self.x, self.theta))[:,np.newaxis]
         pi  = self.getEndEffector()
         pj  = neighbor.getEndEffector()
@@ -135,9 +119,6 @@ class CoppeliaYoubot:
         dc[2] = 0
         dc = dc / np.linalg.norm(dc)
         rxE = self.getEndEffectorR(axis=0)
-        Jw  = Youbot.jacobW(*np.hstack((self.x, self.theta)))
-        Jt  = Youbot.jacob0(*np.hstack((self.x, self.theta)))[:2,:]
-        Jtt = Youbot.jacob0(*np.hstack((self.x, self.theta)))[[2],:]
         sgnID = 1 if self.id == 1 else -1
 
         phi_E = 0.5 * S_operator(de).T @ rxE
@@ -148,34 +129,19 @@ class CoppeliaYoubot:
         nl12 = np.linalg.norm(l12)
         UL = -self.alphaL*(1 - (1/(self.KL*nl12))*(csch((nl12-self.deltaL)/self.KL)**2))*(l12)
         Up = self.KpB*(posB_d - 0.5*(pi+pj))
-        # Uphi = sgnID * self.KphiB*(nl12**2)*(np.array([[-de[1,0]], [de[0,0]]]) * (phi_B[2]))
 
-        dp1 = np.cross(de.squeeze(), np.array([1,0,0]))[:,np.newaxis]
-        dp2 = np.cross(de.squeeze(), np.array([0,1,0]))[:,np.newaxis]
-        dp3 = np.cross(de.squeeze(), np.array([0,0,1]))[:,np.newaxis]
-
-        # JB = np.hstack(( dp1, dp2, dp3))
         JB = S_operator(de)
         phi_Aux = sgnID * self.KphiB * (nl12**2) * JB @ phi_B
-        # print(f"{phi_Aux=}")
         E2 = np.array([[0,0,1,0,0,0,0,0]])
-        S = np.eye(8)
-        # S[:3,:3] *= 0.05
+        S = self.kS*np.eye(8)
         A = np.vstack(( E2, Youbot.jacobnn(*np.hstack((self.x, self.theta)))))
         C = np.vstack(( np.eye(8), -np.eye(8) ))
-        # p = np.array([[0,0,0,1,1,1,1,1]]).T * (q-np.array([[0,0,0,0,0.798, 0.3, 0.720,0]]).T)
-        diffA = np.abs(q[4] + q[5] + q[6]) - 0.4
-        p = -0.5*(np.array([[0,0,0,0,2,2,0.1,0]]).T)*np.array([[0,0,0,0,0.5 - q[4,0],-0.6 - q[5,0],-0.4 - q[6,0],0]]).T
+        p = np.diag(self.KGains) @ (q - self.desQ)
         
         b = np.vstack(( phi_C[2], UL + Up + phi_Aux, self.KphiE*phi_E ))
-        # print(f"{Up[2]=}")
         d = calculateEta(self.theta)
         
         dq, rho, lam = self.NN.update(S, A, C, p, b, d)
-        # print(f"{A[1:4,:].shape=}")
-        # print(f"{dq[1:4].shape=}")
-        # print(f"{b[1:4]=}")
-        # print(f"{A[1:4,:] @ dq - b[1:4]=}")
         self.setArmVelocity(np.squeeze(dq[3:]))
         self.setOmnidirectionalGlobalSpeed(np.squeeze(dq[:3]))
 

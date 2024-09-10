@@ -2,50 +2,31 @@ import numpy as np
 from numpy import sin, cos, sinh
 from collections import deque
 
-class TVQPEIZNN2:
-    def __init__(self, 
-                 y0:np.ndarray, 
-                 shape:tuple[int],
-                 gamma:float = 1.0,
-                 tau:float = 0.05) -> None:
-        self.n, self.m, self.q = shape
-        self.gamma = gamma
-        self.tau = tau
-        self.y = deque(maxlen=2)
-        self.y.append(y0)
+def sgnbi(x:float) -> float:
+    # return x
+    r1, r2 = 2, 0.5
+    abs_x = abs(x)
+    sgn = 1 if x > 0 else -1
+    if (abs_x > 1):
+        return sgn*(abs_x**r1)
+    return (r1/r2)*sgn*(abs_x**r2)
 
+def linear(x:float) -> float:
+    return x
 
-    def update(self, 
-               Sk:np.ndarray, 
-               Ak:np.ndarray, 
-               Ck:np.ndarray, 
-               pk:np.ndarray, 
-               bk:np.ndarray, 
-               dk:np.ndarray) -> np.ndarray:
-        yk = self.y[-1].copy()
-        xk = yk[:self.n].copy()
-        lambdak = yk[self.n:].copy()
-        mu = np.linalg.det(Ak @ Ak.T)
-        lmax, epsilon = 0.2, 0.02
-        if mu > epsilon:
-            lb = 0
-        else:
-            lb = (1-(mu/epsilon)**2)*(lmax**2)
-        Q = Ak.T @ np.linalg.inv(Ak @ Ak.T + (lb**2) * np.eye(7))
-        G = np.eye(self.n) - Q @ Ak
-        hk = dk - Ck @ xk
-        eta = np.vstack((
-            G @ (Sk @ xk + pk + Ck.T @ lambdak) + Q @ (Ak @ xk - bk),
-            hk + lambdak - np.sqrt(hk*hk + lambdak*lambdak)
-        ))
-        yk_1 = yk - self.gamma * self.tau * eta
-        # if(len(self.y) != self.y.maxlen):
-        #      yk_1[:self.n] = np.linalg.pinv(Ak) @ bk
-        #      yk_1[self.n:] = np.zeros((self.q, 1))
-        self.y.append(yk_1.copy())
-        print(f"{eta=}")
-        return (yk_1[:self.n].copy(), 0, yk_1[self.n:].copy())
+def power_sigmoid(x:float) -> float:
+    zeta = 3
+    if abs(x) >= 1:
+        return x**3
+    return (1 + np.exp(-zeta) - np.exp(-zeta*x))/(1 - np.exp(-zeta) + np.exp(-zeta*x))
 
+def power_activation(x:float) -> float:
+    zeta = 3
+    return x**zeta
+
+def hyperbolic_sine(x:float) -> float:
+    zeta = 2
+    return 0.5*(np.exp(zeta*x) - np.exp(-zeta*x))
 
 class TVQPEIZNN:
     def __init__(self, 
@@ -54,7 +35,8 @@ class TVQPEIZNN:
                  u0:np.ndarray, 
                  shape:tuple[int],
                  gamma:float = 1.0,
-                 tau:float = 0.05) -> None:
+                 tau:float = 0.05,
+                 AF = linear) -> None:
         self.n, self.m, self.q = shape
         self.gamma = gamma
         self.tau = tau
@@ -76,7 +58,7 @@ class TVQPEIZNN:
         self.G.append(G0.copy())
         self.y.append(y0.copy())
 
-        self.PSI = np.vectorize(linear)
+        self.PSI = np.vectorize(AF)
 
 
     def update(self, 
@@ -94,19 +76,12 @@ class TVQPEIZNN:
             np.hstack(( Ak, np.zeros((self.m,self.m)), np.zeros((self.m,self.q)) )),
             np.hstack((-Ck, np.zeros((self.q,self.m)), np.eye(self.q) ))
         ))
-        # Gk = np.vstack((
-        #     np.hstack(( Sk, Ak.T)),
-        #     np.hstack(( Ak, np.zeros((self.m,self.m)) )),
-        # ))
         hk = dk - Ck @ xk
         uk = np.vstack((
             pk,
             -bk,
             dk - np.sqrt(hk*hk + lambdak*lambdak + self.deltaplus)
         ))
-        # Gk = Ak
-        # uk = -bk
-
         delta_uk = uk - self.u[-1]
         delta_Gk = Gk - self.G[-1]
 
@@ -165,8 +140,7 @@ def power_sigmoid(x:float) -> float:
     zeta = 3
     if abs(x) >= 1:
         return x**3
-    return 10*x
-    # return (1 + np.exp(-zeta) - np.exp(-zeta*x))/(1 - np.exp(-zeta) + np.exp(-zeta*x))
+    return (1 + np.exp(-zeta) - np.exp(-zeta*x))/(1 - np.exp(-zeta) + np.exp(-zeta*x))
 
 def power_activation(x:float) -> float:
     zeta = 3

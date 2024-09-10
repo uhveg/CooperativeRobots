@@ -1,11 +1,8 @@
-Run file `FourYoubot.ttt` in CoppeliaSim, and then run file `MainController.py`.
+Run file `youbots.ttt` in CoppeliaSim, and then run file `ThesisQPPINVJ.py` or `ThesisQPZNN1.py`.
 
-`Coppelia.py` file contains the required code to connect Coppelia and also the controller. 
+`Coppelia.py` file contains the required code to connect Coppelia and also the two controller (classic and neural). 
 
 `robotics.py` file has the youbot info, and the ZNN-TVQPEI neural controller class definition.
 
-Once the simulation has finished, the logs are stored in a sqlite database, that can be latter plot with the script `plotlogQP.py`, like:
-
-- `python.exe plotlogQP.py logs.db images test`
-
-the first argument is the database, the second is the folder used to store the results and the last one is the tablename (this is choosen in `MainController.py`)
+Once the simulation has finished, the logs are stored in a sqlite database.
+The file `plotlog.py` can be used to plot the values stored, but it is just a helper script, there are a lot of considerations to take before use. 
