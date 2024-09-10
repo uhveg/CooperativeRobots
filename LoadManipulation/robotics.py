@@ -178,7 +178,7 @@ def hyperbolic_sine(x:float) -> float:
 
 
 class Youbot:
-    # This are for CoppeliaSim
+    # This are for CoppeliaSim, as precise as it can gets
     dx0 = 0.16618
     dz0 = 0.250
     a1 = 0.03301
@@ -187,7 +187,7 @@ class Youbot:
     d5 = 0.205
 
     # a1, a2, a3 = 0.033, 0.155, 0.135
-    # d5 = 0.210 # 20676
+    # d5 = 0.210
     # dx0, dz0 = 0.167, 0.245
     th_lower = np.deg2rad(np.array([-169,-90,-131,-102,-160]))
     th_upper = np.deg2rad(np.array([169,65,131,102,160]))

@@ -11,7 +11,7 @@ DEFAULT_LOG_COLUMNS += ['nl01', 'nl12', 'nl23', 'nl03', 'K01', 'K12', 'K23', 'K0
 class Log:
     def __init__(self, name:str, columns:list[str]=DEFAULT_LOG_COLUMNS, replace:bool=False) -> None:
         self.name = name
-        self.conn = sqlite3.connect(f'logging/logs.db')
+        self.conn = sqlite3.connect(f'logs.db')
         self.cursor = self.conn.cursor()
         columns_definition = ', '.join([f"{col} BLOB" for col in columns])
         # Create a table if it doesn't exist

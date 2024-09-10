@@ -4,9 +4,11 @@ import numpy as np
 import sys
 
 time = 0
+BASE_ORIENTATION = 1
 
 try:
-    client = RemoteAPIClient(timeout=3)
+    # Use localhost if Coppelia is running on the same machine
+    client = RemoteAPIClient(host="192.168.100.51", port=23000)
     sim = client.require('sim')
     sim.getObject('/DefaultCamera')
     print("Connected to CoppeliaSim successfully.")
@@ -99,11 +101,6 @@ class CoppeliaYoubot:
 
 
         return [q, dq, self.getEndEffector(), rho, lam, A @ dq - b, d - C @ dq, cosimx, cosimz]
-        # cosim_derxe = (de.T @ rxE).item()
-        # cosim_dcrxc = (dc.T @ self.getCarRx()).item()
-        # cosim_ddede = (dir_d.T @ de).item()
-
-        # return (A @ dq - b, dq, rho, lam, 0, de, cosim_ddede, cosim_dcrxc, cosim_derxe, d - C @ dq)
 
     def loadOrientation(self, panel: np.ndarray, R:np.ndarray, Rd:np.ndarray) -> None:
         pi = self.getEndEffector()
@@ -115,15 +112,11 @@ class CoppeliaYoubot:
 
     def pd_position_error(self, pd, p) -> None:
         e = self.KpB*(pd - p)
-        v = e
-        # v[2,0] *= self.KpB
-        # if len(self.error_pos) > 0:
-        #     v += 1*((e - self.error_pos[-1])/0.05)
         self.error_pos.append(e.copy())
-        return v
+        return e
 
     def baseOrientation(self) -> np.ndarray:
-        dc = -(self.x - self.neighbors['youbot'][self.orientation_index['rxC']].x)
+        dc = BASE_ORIENTATION * (self.x - self.neighbors['youbot'][self.orientation_index['rxC']].x)
         dc[2] = 0
         dc = dc / np.linalg.norm(dc)
         return 0.5 * S_operator(dc).T @ self.getCarRx()
@@ -315,17 +308,8 @@ def updateTubePose(objectID:int, p1:np.ndarray, p2:np.ndarray) -> None:
     sim.setObjectQuaternion(objectID, [v[0] ,v[1], v[2], np.cos(angle/2)])
 
 def calculateEta(theta):
-    # first three inf
-    # thetal = Youbot.th_lower + 0.3
-    # thetar = Youbot.th_upper - 0.3
-    # phi1 = Youbot.th_upper - Youbot.dth_upp * ((theta - thetar)**2/(Youbot.th_upper - thetar)**2)
-    # phi2 = Youbot.th_lower - Youbot.dth_low * ((theta - thetal)**2/(Youbot.th_lower - thetal)**2)
-    # eta_plus = np.where(theta>thetar, phi1, Youbot.dth_upp)
-    # eta_minus = np.where(theta<thetal, phi2, Youbot.dth_low)
-
     xi_p = np.minimum(Youbot.dth_upp, 0.1*(Youbot.th_upper-theta))
     xi_m = np.maximum(Youbot.dth_low, 0.1*(Youbot.th_lower-theta))
-
 
     d = np.vstack((
         0.8*np.ones((3, 1)),
@@ -333,10 +317,12 @@ def calculateEta(theta):
         0.8*np.ones((3, 1)),
         -xi_m[:,np.newaxis]
     ))
+    # uncomment next line in order to ignore inequality constraints
     # d = 1e8*np.ones((16, 1))
     return d
 
 
+# Function not used (ignore)
 def perturbation(t:float, id:int) -> np.ndarray:
     # if id == 1:
     return np.zeros((3,1))
@@ -358,16 +344,7 @@ class CoppeliaPanel:
         self.updatePose(P)
 
     def updatePose(self, P:list[np.ndarray]) -> None:
-        # P = []
-        # for ee in self.object_points:
-        #     pos = sim.getObjectPosition(ee)
-        #     P.append(np.array(pos))
-        # print(P)
-        # print(P[0])
         p:np.ndarray = (P[0]+P[1]+P[2]+P[3])/4
-        # print(p)
-        # p[2] -= 0.02
-        ## via the object, not the work
         dirx1 = (P[1] - P[0]) / np.linalg.norm(P[1] - P[0])
         dirx2 = (P[2] - P[3]) / np.linalg.norm(P[2] - P[3])
         diry1 = (P[0] - P[3]) / np.linalg.norm(P[3] - P[0])
