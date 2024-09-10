@@ -4,9 +4,9 @@ import numpy as np
 import sys
 
 time = 0
+
 try:
-    # Use localhost if Coppelia is running on the same machine
-    client = RemoteAPIClient(host="localhost", port=23000)
+    client = RemoteAPIClient(timeout=3)
     sim = client.require('sim')
     sim.getObject('/DefaultCamera')
     print("Connected to CoppeliaSim successfully.")
@@ -33,109 +33,157 @@ def startSimulation() -> None:
     sim.startSimulation()
 
 class CoppeliaYoubot:
-    def __init__(self, name:str, parameters) -> None:
-        self.id = int(name[-2])
+    def __init__(self, name:str) -> None:
+        self.id = int(name[-1])
         self.robot = sim.getObject(f"/{name}")
         self.yScript = sim.getScript(sim.scripttype_childscript, self.robot)
         self.yFuncs = client.getScriptFunctions(self.yScript)
         self.joints = [sim.getObject(f"/{name}/youBotArmJoint{i}") for i in range(5)]
 
-        self.grippers = [sim.getObject(f"/{name}/youBotGripperJoint1"), \
-                         sim.getObject(f"/{name}/youBotGripperJoint2")]
-        sim.setJointPosition(self.grippers[1], -0.015)
-        sim.setJointPosition(self.grippers[0], 0.003)
-
-        self.neighbors: dict[str, list['CoppeliaYoubot'] | list[float]] = dict(youbot=[], K=[])
-        self.orientation_index = dict(rxE=1, rzE=0, rxC=0)
-        self.error_pos = deque(maxlen=2)
-
         self.x = np.zeros((3,))
         self.theta = np.zeros((5,))
         self.T = Youbot.fkine(*np.hstack((self.x,self.theta)))
 
-        step_sz, self.KphiC, self.KphiE, \
-            self.KphiB, self.KpB, self.kS, \
-                self.desQ, self.KGains, self.base_ori, \
-                    gamma, AF = parameters
+        self.KL, self.alphaL, self.deltaL = 3.15, 1.0, 0.1
+        self.KphiC, self.KphiE, self.KphiB = 5.0, 5.0, 5.0
+        self.KpB = 5.0
 
-        self.Kznn = znn(3.15, step_sz)
+        self.Kznn = znn(3.15, 0.05)
+
         n, m, q = 8, 7, 16
         y0 = 0.0*np.ones((m+n+q,1))
         G0 = 0.5*np.ones((m+n+q,m+n+q))
         u0 = 0.0*np.ones((m+n+q,1))
-        self.NN = TVQPEIZNN(y0, G0, u0, (n,m,q), gamma=gamma, tau=step_sz, AF=AF)
-
-    def applyNeuralControl(self, load:'CoppeliaPanel', posB_d:np.ndarray, RB_d: np.ndarray) -> list[np.ndarray]:
+        self.NN = TVQPEIZNN(y0, G0, u0, (n,m,q), gamma=1.0, tau=0.05)
+        # self.NN = TVQPEIZNN2(y0[:n+q], (n,m,q), gamma=5.0, tau=0.05)
+    
+    def applyFixedControl(self, neighbor:'CoppeliaYoubot', posB_d:np.ndarray, dir_d: np.ndarray) -> tuple[np.ndarray]:
         self.updateValues()
-        q   = np.hstack((self.x, self.theta))[:,np.newaxis]
-        phi_E, cosimx, cosimz = self.endEffectorOrientation()
-        phi_C = self.baseOrientation()
+        pi  = self.getEndEffector()
+        pj  = neighbor.getEndEffector()
+        de  = (pj - pi) / np.linalg.norm(pj - pi)
+        dc  = (self.x - neighbor.x)
+        dc[2] = 0
+        dc = dc / np.linalg.norm(dc)
+        rxE = self.getEndEffectorR(axis=0)
 
-        UL = self.edgeWeighted()
-        Up = self.pd_position_error(posB_d, load.p[:, np.newaxis])
-
-        phi_Aux = self.loadOrientation(load.p[:,np.newaxis], load.R, RB_d)
-        E2 = np.array([[0,0,1,0,0,0,0,0]])
-        Sdiag = self.kS*np.array([1,1,1,1,1,1,1,1])
-        S = np.diag(Sdiag)
-        A = np.vstack(( E2, Youbot.jacobnn(*np.hstack((self.x, self.theta)))))
-        C = np.vstack(( np.eye(8), -np.eye(8) ))
-        # p = -5*(np.array([[0.1,0.1,0.1,0.1,2,2,0.1,0.1]]).T)*np.array([[0,0,0,0,-0.4 - q[4,0],1.1 - q[5,0],0.8708 - q[6,0],0]]).T
-        p = np.diag(self.KGains) @ (q - self.desQ)
+        phi_E = 0.5 * S_operator(de).T @ rxE
+        phi_C = 0.5 * S_operator(dc).T @ self.getCarRx()
+        phi_B = 0.5 * S_operator(dir_d).T @ de
+        phi_BB = (dir_d - de)
         
-        b = np.vstack(( phi_C[2], UL + Up + phi_Aux, self.KphiE*phi_E ))
-        d = calculateEta(self.theta)
-        dq, rho, lam = self.NN.update(S, A, C, p, b, d)
+        sgnID = 1 if self.id == 1 else -1
+        l12 = pi - pj
+        nl12 = np.linalg.norm(l12)
+        
+        if self.id == 1:
+            self.Kznn.updateK((nl12 - 1.5))
+            self.KL = self.Kznn.k
+        else:
+            self.KL = neighbor.KL
+        
+        UL = -self.alphaL*(1 - (1/(self.KL*nl12))*(csch((nl12-self.deltaL)/self.KL)**2))*(l12)
+        Up = self.KpB*(posB_d - 0.5*(pi+pj))
+        Uphi = sgnID * self.KphiB*(nl12**2)*(np.array([[-de[1,0]], [de[0,0]]]) * (phi_B[2]))
+
+        dp1 = np.cross(de.squeeze(), np.array([1,0,0]))[:,np.newaxis]
+        dp2 = np.cross(de.squeeze(), np.array([0,1,0]))[:,np.newaxis]
+        dp3 = np.cross(de.squeeze(), np.array([0,0,1]))[:,np.newaxis]
+
+        # JB = np.hstack(( dp1, dp2, dp3))
+        JB = S_operator(de)
+        phi_Aux = sgnID * self.KphiB * (nl12**2) * JB @ phi_B
+        # print(phi_B)
+        # b = np.vstack(( UL + Up[:2] + Uphi,  Up[2] + phi_B[0], self.KphiE*phi_E))
+        b = np.vstack(( UL + Up + phi_Aux + perturbation(time, self.id), self.KphiE*phi_E))
+
+        J = Youbot.jacob0(*np.hstack((self.x, self.theta)))
+        mu = np.linalg.det(J @ J.T)
+        lmax, epsilon = 0.2, 0.02
+        if mu > epsilon:
+            lb = 0
+        else:
+            lb = (1-(mu/epsilon)**2)*(lmax**2)
+            # print("bad")
+            # stopSimulation()
+            # exit(-1)
+        pJ = J.T @ np.linalg.inv(J @ J.T + (lb**2) * np.eye(6))
+        dq = pJ @ b
+        dq[2,0] = self.KphiC * phi_C[2,0]
+
         self.setArmVelocity(np.squeeze(dq[3:]))
         self.setOmnidirectionalGlobalSpeed(np.squeeze(dq[:3]))
 
+        
 
-        return [q, dq, self.getEndEffector(), rho, lam, A @ dq - b, d - C @ dq, cosimx, cosimz]
+        cosim_derxe = (de.T @ rxE).item()
+        cosim_dcrxc = (dc.T @ self.getCarRx()).item()
+        cosim_ddede = (dir_d.T @ de).item()
+        assert type(cosim_derxe) == float
+        assert type(cosim_dcrxc) == float
+        assert type(cosim_ddede) == float
+        return (dq, nl12, de, cosim_ddede, cosim_dcrxc, cosim_derxe)
 
-    def loadOrientation(self, panel: np.ndarray, R:np.ndarray, Rd:np.ndarray) -> None:
-        pi = self.getEndEffector()
-        dpb = (panel - pi) / np.linalg.norm(panel - pi)
-        phi  = 0
-        phi += (np.linalg.norm(panel - pi)**2) * S_operator(dpb) @ S_operator(Rd[:,0]).T @ R[:,[0]]
-        phi += (np.linalg.norm(panel - pi)**2) * S_operator(dpb) @ S_operator(Rd[:,1]).T @ R[:,[1]]
-        return self.KphiB*phi
-
-    def pd_position_error(self, pd, p) -> None:
-        e = self.KpB*(pd - p)
-        self.error_pos.append(e.copy())
-        return e
-
-    def baseOrientation(self) -> np.ndarray:
-        dc = self.base_ori * (self.x - self.neighbors['youbot'][self.orientation_index['rxC']].x)
+    def applyNeuralControl(self, neighbor:'CoppeliaYoubot', posB_d:np.ndarray, dir_d: np.ndarray) -> tuple[np.ndarray]:
+        self.updateValues()
+        self.NN.gamma = 0.5 + 15*time/15
+        q   = np.hstack((self.x, self.theta))[:,np.newaxis]
+        pi  = self.getEndEffector()
+        pj  = neighbor.getEndEffector()
+        de  = (pj - pi) / np.linalg.norm(pj - pi)
+        dc  = (self.x - neighbor.x)
         dc[2] = 0
         dc = dc / np.linalg.norm(dc)
-        return 0.5 * S_operator(dc).T @ self.getCarRx()
-
-    def endEffectorOrientation(self) -> np.ndarray:
-        pi = self.getEndEffector()
-        pjx  = self.neighbors['youbot'][self.orientation_index['rxE']].getEndEffector()
-        pjz  = self.neighbors['youbot'][self.orientation_index['rzE']].getEndEffector()
-        dex  = (pjx - pi) / np.linalg.norm(pjx - pi)
-        dez  = (pjz - pi) / np.linalg.norm(pjz - pi)
         rxE = self.getEndEffectorR(axis=0)
-        rzE = self.getEndEffectorR(axis=2)
-        return (0.5 * ( S_operator(dex).T @ rxE + S_operator(dez).T @ rzE ), (dex.T @ rxE).item(), (dez.T @ rzE).item())
+        Jw  = Youbot.jacobW(*np.hstack((self.x, self.theta)))
+        Jt  = Youbot.jacob0(*np.hstack((self.x, self.theta)))[:2,:]
+        Jtt = Youbot.jacob0(*np.hstack((self.x, self.theta)))[[2],:]
+        sgnID = 1 if self.id == 1 else -1
 
-    def edgeWeighted(self) -> np.ndarray:
-        UL = np.zeros((3,1))
-        pi = self.getEndEffector()
-        alpha, delta = 1.0, 0.1
-        for youbot, K in zip(self.neighbors['youbot'], self.neighbors['K']):
-            pj = youbot.getEndEffector()
-            l12 = pi - pj
-            nl12 = np.linalg.norm(l12)
-            UL -= alpha*(1 - (1/(K*nl12))*(csch((nl12-delta)/K)**2))*(l12)
-        return UL
+        phi_E = 0.5 * S_operator(de).T @ rxE
+        phi_C = 0.5 * S_operator(dc).T @ self.getCarRx()
+        phi_B = 0.5 * S_operator(dir_d).T @ de
 
-    def addNeighbor(self, bot:'CoppeliaYoubot', K:float) -> None:
-        if bot not in self.neighbors['youbot']:
-            self.neighbors['youbot'].append(bot)
-            self.neighbors['K'].append(K)
+        l12 = pi - pj
+        nl12 = np.linalg.norm(l12)
+        UL = -self.alphaL*(1 - (1/(self.KL*nl12))*(csch((nl12-self.deltaL)/self.KL)**2))*(l12)
+        Up = self.KpB*(posB_d - 0.5*(pi+pj))
+        # Uphi = sgnID * self.KphiB*(nl12**2)*(np.array([[-de[1,0]], [de[0,0]]]) * (phi_B[2]))
+
+        dp1 = np.cross(de.squeeze(), np.array([1,0,0]))[:,np.newaxis]
+        dp2 = np.cross(de.squeeze(), np.array([0,1,0]))[:,np.newaxis]
+        dp3 = np.cross(de.squeeze(), np.array([0,0,1]))[:,np.newaxis]
+
+        # JB = np.hstack(( dp1, dp2, dp3))
+        JB = S_operator(de)
+        phi_Aux = sgnID * self.KphiB * (nl12**2) * JB @ phi_B
+        # print(f"{phi_Aux=}")
+        E2 = np.array([[0,0,1,0,0,0,0,0]])
+        S = np.eye(8)
+        # S[:3,:3] *= 0.05
+        A = np.vstack(( E2, Youbot.jacobnn(*np.hstack((self.x, self.theta)))))
+        C = np.vstack(( np.eye(8), -np.eye(8) ))
+        # p = np.array([[0,0,0,1,1,1,1,1]]).T * (q-np.array([[0,0,0,0,0.798, 0.3, 0.720,0]]).T)
+        diffA = np.abs(q[4] + q[5] + q[6]) - 0.4
+        p = -0.5*(np.array([[0,0,0,0,2,2,0.1,0]]).T)*np.array([[0,0,0,0,0.5 - q[4,0],-0.6 - q[5,0],-0.4 - q[6,0],0]]).T
+        
+        b = np.vstack(( phi_C[2], UL + Up + phi_Aux, self.KphiE*phi_E ))
+        # print(f"{Up[2]=}")
+        d = calculateEta(self.theta)
+        
+        dq, rho, lam = self.NN.update(S, A, C, p, b, d)
+        # print(f"{A[1:4,:].shape=}")
+        # print(f"{dq[1:4].shape=}")
+        # print(f"{b[1:4]=}")
+        # print(f"{A[1:4,:] @ dq - b[1:4]=}")
+        self.setArmVelocity(np.squeeze(dq[3:]))
+        self.setOmnidirectionalGlobalSpeed(np.squeeze(dq[:3]))
+
+        cosim_derxe = (de.T @ rxE).item()
+        cosim_dcrxc = (dc.T @ self.getCarRx()).item()
+        cosim_ddede = (dir_d.T @ de).item()
+
+        return (A @ dq - b, dq, rho, lam, nl12, de, cosim_ddede, cosim_dcrxc, cosim_derxe, d - C @ dq)
 
     def getTheta(self) -> np.ndarray:
         return self.theta[:,np.newaxis]
@@ -251,21 +299,6 @@ class CoppeliaYoubot:
         self.setArmPosition(q[3:])
         return q
 
-    def getNeighbor(self, id:int):
-        for index, n in enumerate(self.neighbors['youbot']):
-            if n.id == id:
-                return index, n
-        return None
-    
-    def updateK(self, id:int, K:float) -> None:
-        if (tup := self.getNeighbor(id)) is None:
-            return
-        j, n = tup
-        n: 'CoppeliaYoubot'
-        self.neighbors['K'][j] = K
-        i, _ = n.getNeighbor(self.id)
-        n.neighbors['K'][i] = K
-
 class znn:
     def __init__(self, k0:float, tau:float) -> None:
         self.tau = tau
@@ -298,69 +331,33 @@ def updateTubePose(objectID:int, p1:np.ndarray, p2:np.ndarray) -> None:
     sim.setObjectQuaternion(objectID, [v[0] ,v[1], v[2], np.cos(angle/2)])
 
 def calculateEta(theta):
-    xi_p = np.minimum(Youbot.dth_upp, 0.1*(Youbot.th_upper-theta))
-    xi_m = np.maximum(Youbot.dth_low, 0.1*(Youbot.th_lower-theta))
+    # first three inf
+    # thetal = Youbot.th_lower + 0.3
+    # thetar = Youbot.th_upper - 0.3
+    # phi1 = Youbot.th_upper - Youbot.dth_upp * ((theta - thetar)**2/(Youbot.th_upper - thetar)**2)
+    # phi2 = Youbot.th_lower - Youbot.dth_low * ((theta - thetal)**2/(Youbot.th_lower - thetal)**2)
+    # eta_plus = np.where(theta>thetar, phi1, Youbot.dth_upp)
+    # eta_minus = np.where(theta<thetal, phi2, Youbot.dth_low)
+
+    xi_p = np.minimum(0.5*Youbot.dth_upp, 0.1*(Youbot.th_upper-theta))
+    xi_m = np.maximum(0.5*Youbot.dth_low, 0.1*(Youbot.th_lower-theta))
+
 
     d = np.vstack((
-        0.8*np.ones((3, 1)),
+        0.5*np.ones((3, 1)),
         xi_p[:,np.newaxis],
-        0.8*np.ones((3, 1)),
+        0.5*np.ones((3, 1)),
         -xi_m[:,np.newaxis]
     ))
-    # uncomment next line in order to ignore inequality constraints
     # d = 1e8*np.ones((16, 1))
     return d
 
-class CoppeliaPanel:
-    def __init__(self, name:str, p0:list[float], points:list[str], P) -> None:
-        self.id = sim.getObject(f'/{name}')
-        self.object_points = [sim.getObject(p) for p in points]
-        sim.setObjectPosition(self.id, p0)
-        self.p = np.array(p0)
-        self.quaternion = None
-        self.R = None
-        
-        self.updatePose(P, kinematicModel=True)
 
-    def updatePose(self, P:list[np.ndarray], kinematicModel=True) -> None:
-        p:np.ndarray = (P[0]+P[1]+P[2]+P[3])/4
-        dirx1 = (P[1] - P[0]) / np.linalg.norm(P[1] - P[0])
-        dirx2 = (P[2] - P[3]) / np.linalg.norm(P[2] - P[3])
-        diry1 = (P[0] - P[3]) / np.linalg.norm(P[3] - P[0])
-        diry2 = (P[1] - P[2]) / np.linalg.norm(P[2] - P[1])
-        dirx = 0.5 * (dirx1 + dirx2).squeeze()
-        diry = 0.5 * (diry1 + diry2).squeeze()
-        dirz = np.cross(dirx, diry)
-        dirz = dirz / np.linalg.norm(dirz)
-
-        otherz = np.cross(-diry, dirx)
-        otherz = otherz / np.linalg.norm(otherz)
-
-        R = np.hstack(( dirx[:,np.newaxis], diry[:,np.newaxis], dirz[:,np.newaxis] ))
-        self.R = np.hstack(( -diry[:,np.newaxis], dirx[:,np.newaxis], otherz[:,np.newaxis] ))
-        self.p = p.copy()
-        self.quaternion = rotation_matrix_to_quaternion(R)
-        p[2] -= 0.02
-        if kinematicModel:
-            sim.setObjectPosition(self.id, p.tolist())
-            sim.setObjectQuaternion(self.id, self.quaternion.tolist())
-    
-    def updatePoseBck(self) -> None:
-        P = []
-        for ee in self.object_points:
-            pos = sim.getObjectPosition(ee)
-            P.append(np.array(pos))
-        p:np.ndarray = (P[0]+P[1]+P[2]+P[3])/4
-        p[2] -= 0.02
-        Normal = np.cross(P[3] - P[0], P[1] - P[0])
-        Normal = Normal / np.linalg.norm(Normal)
-        z = np.array([0,0,1])
-        z_o = (P[3]-P[0])/np.linalg.norm(P[3]-P[0])
-        axis = np.cross(z, Normal)
-        axis = axis / np.linalg.norm(axis)
-        angle = np.arccos(np.dot(z, Normal))
-        v = np.sin(angle/2)*axis
-        self.p = p.copy()
-        self.quaternion = np.array([v[0] ,v[1], v[2], np.cos(angle/2)])
-        sim.setObjectPosition(self.id, p.tolist())
-        sim.setObjectQuaternion(self.id, [v[0] ,v[1], v[2], np.cos(angle/2)])
+def perturbation(t:float, id:int) -> np.ndarray:
+    # if id == 1:
+    return np.zeros((3,1))
+    # return np.array([[
+    #     3*((0.5 + 0.5*np.tanh(t-10)) - (0.5 + 0.5*np.tanh(t-12))),
+    #     0,
+    #     0
+    # ]]).T

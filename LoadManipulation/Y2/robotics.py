@@ -2,31 +2,49 @@ import numpy as np
 from numpy import sin, cos, sinh
 from collections import deque
 
-def sgnbi(x:float) -> float:
-    # return x
-    r1, r2 = 2, 0.5
-    abs_x = abs(x)
-    sgn = 1 if x > 0 else -1
-    if (abs_x > 1):
-        return sgn*(abs_x**r1)
-    return (r1/r2)*sgn*(abs_x**r2)
+class TVQPEIZNN2:
+    def __init__(self, 
+                 y0:np.ndarray, 
+                 shape:tuple[int],
+                 gamma:float = 1.0,
+                 tau:float = 0.05) -> None:
+        self.n, self.m, self.q = shape
+        self.gamma = gamma
+        self.tau = tau
+        self.y = deque(maxlen=2)
+        self.y.append(y0)
 
-def linear(x:float) -> float:
-    return x
 
-def power_sigmoid(x:float) -> float:
-    zeta = 3
-    if abs(x) >= 1:
-        return x**3
-    return (1 + np.exp(-zeta) - np.exp(-zeta*x))/(1 - np.exp(-zeta) + np.exp(-zeta*x))
-
-def power_activation(x:float) -> float:
-    zeta = 3
-    return x**zeta
-
-def hyperbolic_sine(x:float) -> float:
-    zeta = 2
-    return 0.5*(np.exp(zeta*x) - np.exp(-zeta*x))
+    def update(self, 
+               Sk:np.ndarray, 
+               Ak:np.ndarray, 
+               Ck:np.ndarray, 
+               pk:np.ndarray, 
+               bk:np.ndarray, 
+               dk:np.ndarray) -> np.ndarray:
+        yk = self.y[-1].copy()
+        xk = yk[:self.n].copy()
+        lambdak = yk[self.n:].copy()
+        mu = np.linalg.det(Ak @ Ak.T)
+        lmax, epsilon = 0.2, 0.02
+        if mu > epsilon:
+            lb = 0
+        else:
+            lb = (1-(mu/epsilon)**2)*(lmax**2)
+        Q = Ak.T @ np.linalg.inv(Ak @ Ak.T + (lb**2) * np.eye(7))
+        G = np.eye(self.n) - Q @ Ak
+        hk = dk - Ck @ xk
+        eta = np.vstack((
+            G @ (Sk @ xk + pk + Ck.T @ lambdak) + Q @ (Ak @ xk - bk),
+            hk + lambdak - np.sqrt(hk*hk + lambdak*lambdak)
+        ))
+        yk_1 = yk - self.gamma * self.tau * eta
+        # if(len(self.y) != self.y.maxlen):
+        #      yk_1[:self.n] = np.linalg.pinv(Ak) @ bk
+        #      yk_1[self.n:] = np.zeros((self.q, 1))
+        self.y.append(yk_1.copy())
+        print(f"{eta=}")
+        return (yk_1[:self.n].copy(), 0, yk_1[self.n:].copy())
 
 
 class TVQPEIZNN:
@@ -36,8 +54,7 @@ class TVQPEIZNN:
                  u0:np.ndarray, 
                  shape:tuple[int],
                  gamma:float = 1.0,
-                 tau:float = 0.05,
-                 AF = linear) -> None:
+                 tau:float = 0.05) -> None:
         self.n, self.m, self.q = shape
         self.gamma = gamma
         self.tau = tau
@@ -59,7 +76,7 @@ class TVQPEIZNN:
         self.G.append(G0.copy())
         self.y.append(y0.copy())
 
-        self.PSI = np.vectorize(AF)
+        self.PSI = np.vectorize(linear)
 
 
     def update(self, 
@@ -77,12 +94,18 @@ class TVQPEIZNN:
             np.hstack(( Ak, np.zeros((self.m,self.m)), np.zeros((self.m,self.q)) )),
             np.hstack((-Ck, np.zeros((self.q,self.m)), np.eye(self.q) ))
         ))
+        # Gk = np.vstack((
+        #     np.hstack(( Sk, Ak.T)),
+        #     np.hstack(( Ak, np.zeros((self.m,self.m)) )),
+        # ))
         hk = dk - Ck @ xk
         uk = np.vstack((
             pk,
             -bk,
             dk - np.sqrt(hk*hk + lambdak*lambdak + self.deltaplus)
         ))
+        # Gk = Ak
+        # uk = -bk
 
         delta_uk = uk - self.u[-1]
         delta_Gk = Gk - self.G[-1]
@@ -126,8 +149,36 @@ class TVQPEIZNN:
         return (yk_1[:self.n].copy(), yk_1[self.n:self.n+self.m].copy(), yk_1[self.n+self.m:].copy())
 
 
+def sgnbi(x:float) -> float:
+    # return x
+    r1, r2 = 2, 0.5
+    abs_x = abs(x)
+    sgn = 1 if x > 0 else -1
+    if (abs_x > 1):
+        return sgn*(abs_x**r1)
+    return (r1/r2)*sgn*(abs_x**r2)
+
+def linear(x:float) -> float:
+    return x
+
+def power_sigmoid(x:float) -> float:
+    zeta = 3
+    if abs(x) >= 1:
+        return x**3
+    return 10*x
+    # return (1 + np.exp(-zeta) - np.exp(-zeta*x))/(1 - np.exp(-zeta) + np.exp(-zeta*x))
+
+def power_activation(x:float) -> float:
+    zeta = 3
+    return x**zeta
+
+def hyperbolic_sine(x:float) -> float:
+    zeta = 2
+    return 0.5*(np.exp(zeta*x) - np.exp(-zeta*x))
+
+
 class Youbot:
-    # This are for CoppeliaSim, as precise as it can gets
+    # This are for CoppeliaSim
     dx0 = 0.16618
     dz0 = 0.250
     a1 = 0.03301
@@ -136,12 +187,10 @@ class Youbot:
     d5 = 0.205
 
     # a1, a2, a3 = 0.033, 0.155, 0.135
-    # d5 = 0.210
+    # d5 = 0.210 # 20676
     # dx0, dz0 = 0.167, 0.245
     th_lower = np.deg2rad(np.array([-169,-90,-131,-102,-160]))
     th_upper = np.deg2rad(np.array([169,65,131,102,160]))
-    #                               -2.94, -1.57, -2.28, -1.78, -2.79
-    #                                2.94,  1.13,  2.28,  1.78,  2.79
     dth_upp = np.deg2rad(90*np.ones((5,)))
     dth_low = -(np.pi/2)*np.ones((5,))
 
@@ -241,43 +290,3 @@ def S_operator(x : np.ndarray) -> np.ndarray:
 		[-v[1], v[0], 0]]
 	return np.array(S)
 
-def Rotx(theta: float) -> np.ndarray:
-    """Creates a rotation matrix for a rotation around the x-axis by angle theta (in radians)."""
-    return np.array([
-        [1, 0, 0],
-        [0, np.cos(theta), -np.sin(theta)],
-        [0, np.sin(theta), np.cos(theta)]
-    ])
-
-def Roty(theta: float) -> np.ndarray:
-    """Creates a rotation matrix for a rotation around the y-axis by angle theta (in radians)."""
-    return np.array([
-        [np.cos(theta), 0, np.sin(theta)],
-        [0, 1, 0],
-        [-np.sin(theta), 0, np.cos(theta)]
-    ])
-
-def Rotz(theta: float) -> np.ndarray:
-    """Creates a rotation matrix for a rotation around the z-axis by angle theta (in radians)."""
-    return np.array([
-        [np.cos(theta), -np.sin(theta), 0],
-        [np.sin(theta), np.cos(theta), 0],
-        [0, 0, 1]
-    ])
-
-def rotation_matrix_to_quaternion(R):
-    """
-    Convert a rotation matrix to a quaternion.
-    
-    Parameters:
-    R (numpy.ndarray): A 3x3 rotation matrix.
-    
-    Returns:
-    numpy.ndarray: A quaternion (q_w, q_x, q_y, q_z) as a 1D array.
-    """
-    q_w = np.sqrt(1.0 + R[0, 0] + R[1, 1] + R[2, 2]) / 2.0
-    q_x = (R[2, 1] - R[1, 2]) / (4.0 * q_w)
-    q_y = (R[0, 2] - R[2, 0]) / (4.0 * q_w)
-    q_z = (R[1, 0] - R[0, 1]) / (4.0 * q_w)
-    
-    return np.array([q_x, q_y, q_z, q_w])
